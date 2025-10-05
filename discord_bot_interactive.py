@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 import shutil
 import json
-import subprocess
+import base64
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -12,9 +12,13 @@ from yt_dlp import YoutubeDL
 
 # ========== الإعدادات ==========
 TOKEN = os.getenv("DISCORD_TOKEN")
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "100"))
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "100"))  # ارفعها حسب حد سيرفرك
 URL_REGEX = re.compile(r"(https?://[^\s]+)", re.IGNORECASE)
 SUPPORTED_DOMAINS = ("tiktok.com", "instagram.com", "instagr.am", "ig.me", "twitter.com", "x.com", "t.co")
+
+# كوكيز اختيارية لتيك توك من البيئة
+TIKTOK_COOKIES_B64 = os.getenv("TIKTOK_COOKIES_B64", "").strip()
+TIKTOK_COOKIES_RAW = os.getenv("TIKTOK_COOKIES", "").strip()
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -46,10 +50,37 @@ async def _ffprobe_json(path: str):
     except Exception:
         return None
 
-# ========== التحميل والتحويل ==========
+def _write_cookies_file_if_any(tmpdir: str) -> str | None:
+    """
+    يكتب cookies.txt من البيئة (B64 أو RAW) إلى ملف مؤقت ويعيد مساره.
+    وإلا يرجّع None.
+    """
+    if TIKTOK_COOKIES_B64:
+        try:
+            data = base64.b64decode(TIKTOK_COOKIES_B64).decode("utf-8", errors="ignore")
+            path = os.path.join(tmpdir, "cookies.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(data)
+            return path
+        except Exception:
+            pass
+    if TIKTOK_COOKIES_RAW:
+        try:
+            path = os.path.join(tmpdir, "cookies.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(TIKTOK_COOKIES_RAW)
+            return path
+        except Exception:
+            pass
+    return None
+
+# ========== التحميل + التحويل ==========
 async def _download_with_ytdlp(url: str):
     tmpdir = tempfile.mkdtemp(prefix="dl_")
     outtmpl = os.path.join(tmpdir, "%(title).80s_%(id)s.%(ext)s")
+
+    cookies_file = _write_cookies_file_if_any(tmpdir)
+
     ydl_opts = {
         "outtmpl": outtmpl,
         "noplaylist": True,
@@ -57,9 +88,24 @@ async def _download_with_ytdlp(url: str):
         "no_warnings": True,
         "format": "bv*+ba/best",            # أفضل فيديو + أفضل صوت
         "merge_output_format": "mp4",
-        "http_headers": {"User-Agent": "Mozilla/5.0"},
+        "http_headers": {
+            # وكيل متصفح حقيقي لتفادي الحظر
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/127.0.0.0 Safari/537.36"),
+            "Referer": "https://www.tiktok.com/",
+        },
         "prefer_ffmpeg": True,
+        "geo_bypass": True,
+        # تلميحات خاصة بتيك توك
+        "extractor_args": {
+            "tiktok": {
+                "app_info": ["auto"],   # يحاول استخدام إعدادات تطبيق رسمية
+            }
+        },
     }
+    if cookies_file:
+        ydl_opts["cookiefile"] = cookies_file
 
     def _run_dl():
         with YoutubeDL(ydl_opts) as ydl:
@@ -77,23 +123,16 @@ async def _download_with_ytdlp(url: str):
     loop = asyncio.get_running_loop()
     src_fp, title = await loop.run_in_executor(None, _run_dl)
 
-    # لو ما فيه ffmpeg — نرجّع الملف كما هو
+    # لا ffmpeg؟ ارجع الملف كما هو
     if not _which("ffmpeg"):
         return src_fp, "video/mp4", title
 
-    # استخدم ffprobe لمعرفة الكوديك/الفريم ريت
+    # افحص الميتاداتا
     meta = await _ffprobe_json(src_fp) or {}
-    v_stream = None
-    a_stream = None
-    for s in meta.get("streams", []):
-        if s.get("codec_type") == "video" and v_stream is None:
-            v_stream = s
-        if s.get("codec_type") == "audio" and a_stream is None:
-            a_stream = s
-
-    vcodec = (v_stream or {}).get("codec_name", "")
-    acodec = (a_stream or {}).get("codec_name", "")
-    # نحاول قراءة معدل الإطارات
+    v_stream = next((s for s in meta.get("streams", []) if s.get("codec_type") == "video"), None)
+    a_stream = next((s for s in meta.get("streams", []) if s.get("codec_type") == "audio"), None)
+    vcodec = (v_stream or {}).get("codec_name", "").lower()
+    acodec = (a_stream or {}).get("codec_name", "").lower()
     fr_str = (v_stream or {}).get("avg_frame_rate") or (v_stream or {}).get("r_frame_rate") or "0/1"
     try:
         num, den = fr_str.split("/")
@@ -101,58 +140,48 @@ async def _download_with_ytdlp(url: str):
     except Exception:
         fps = 0.0
 
-    # إذا الفيديو H.264 والصوت AAC ومعدل الإطارات قريب من 30 ونمط ألوان yuv420p
-    # نكتفي بريمكس + فرض faststart وتطبيع الأبعاد إن لزم.
     need_reencode = False
-    if vcodec.lower() != "h264" or acodec.lower() != "aac":
+    if vcodec != "h264" or acodec != "aac":
         need_reencode = True
-    # لو fps غريب جدًا (0 أو > 61) أو متغيّر — نثبّت 30
     if fps < 15 or fps > 61:
         need_reencode = True
 
-    out_dir = os.path.dirname(src_fp)
-    out_fp = os.path.join(out_dir, "converted.mp4")
+    out_fp = os.path.join(os.path.dirname(src_fp), "converted.mp4")
 
     if not need_reencode:
-        # ريمكس + تأكيد faststart + تأكد الأبعاد زوجية و yuv420p
-        # ملاحظة: بعض الملفات تكون yuvj420p أو أبعاد فردية → نجبر فِلتر بسيط.
-        cmd = [
+        # ريمكس + أبعاد زوجية + faststart
+        code, out, err = await _run_cmd([
             "ffmpeg", "-y",
             "-hwaccel", "auto",
             "-i", src_fp,
             "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-            "-c:v", "copy",    # سنحاول copy أولاً
+            "-c:v", "copy",
             "-c:a", "copy",
             "-movflags", "+faststart",
             out_fp
-        ]
-        code, out, err = await _run_cmd(cmd)
-        # لو فشل copy بسبب عدم توافق الفلتر، نعيد بترميز كامل
+        ])
         if code != 0 or not os.path.exists(out_fp) or os.path.getsize(out_fp) == 0:
             need_reencode = True
 
     if need_reencode:
-        # ترميز كامل لضمان التوافق + منع التجمّد
-        cmd = [
+        # ترميز كامل — يضمن عدم التجمّد + توافق عالي
+        code, out, err = await _run_cmd([
             "ffmpeg", "-y",
             "-hwaccel", "auto",
             "-i", src_fp,
-            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=30",  # أبعاد زوجية + 30fps ثابت
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=30",
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
-            "-preset", "medium",
+            "-preset", "medium",  # لو بطيء كثير على Railway جرّب 'faster' أو 'ultrafast'
             "-crf", "18",
-            "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",  # مفاتيح إطارات منتظمة
+            "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             out_fp
-        ]
-        code, out, err = await _run_cmd(cmd)
+        ])
         if code != 0 or not os.path.exists(out_fp) or os.path.getsize(out_fp) == 0:
-            # لو فشل لأي سبب، رجّع الأصلي بدل ما نفشل
             return src_fp, "video/mp4", title
 
-    # نجاح — نظّف المصدر
     try:
         os.remove(src_fp)
     except Exception:
@@ -189,27 +218,19 @@ class URLModal(discord.ui.Modal, title="📥 أدخل رابط المقطع"):
 
             if size_bytes <= limit_bytes:
                 filename = f"{title}.mp4"
-                await dm.send(
-                    content=f"📥 **تم تحميل مقطعك بنجاح:**\n{title}",
-                    file=discord.File(filepath, filename)
-                )
+                await dm.send(content=f"📥 **تم تحميل مقطعك بنجاح:**\n{title}", file=discord.File(filepath, filename))
             else:
-                await dm.send(
-                    f"⚠️ حجم الملف {size_bytes/1024/1024:.1f}MB يتجاوز الحد {MAX_UPLOAD_MB}MB.\n"
-                    "جرّب جودة أقل أو رابط آخر."
-                )
+                await dm.send(f"⚠️ حجم الملف {size_bytes/1024/1024:.1f}MB يتجاوز الحد {MAX_UPLOAD_MB}MB.")
         except Exception as e:
             try:
                 dm = self.requester.dm_channel or await self.requester.create_dm()
-                await dm.send(f"❌ حدث خطأ أثناء التحميل/التحويل:\n{e}")
+                await dm.send(f"❌ خطأ أثناء التحميل/التحويل:\n{e}")
             except Exception:
                 pass
         finally:
             if filepath and os.path.exists(filepath):
-                try:
-                    os.remove(filepath)
-                except Exception:
-                    pass
+                try: os.remove(filepath)
+                except: pass
 
 class PanelView(discord.ui.View):
     def __init__(self):
