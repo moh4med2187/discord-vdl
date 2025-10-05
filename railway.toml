@@ -1,0 +1,6 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "apt-get update && apt-get install -y ffmpeg"
+
+[deploy]
+startCommand = "python -u discord_bot_interactive.py"
