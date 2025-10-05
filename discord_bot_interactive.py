@@ -50,11 +50,25 @@ async def _ffprobe_json(path: str):
     except Exception:
         return None
 
+import urllib.request
+
 def _write_cookies_file_if_any(tmpdir: str) -> str | None:
     """
-    يكتب cookies.txt من البيئة (B64 أو RAW) إلى ملف مؤقت ويعيد مساره.
-    وإلا يرجّع None.
+    يحمّل cookies.txt من رابط خارجي أو من المتغيرات البيئية.
     """
+    url = os.getenv("TIKTOK_COOKIES_URL", "").strip()
+    if url:
+        try:
+            path = os.path.join(tmpdir, "cookies.txt")
+            with urllib.request.urlopen(url) as resp:
+                data = resp.read().decode("utf-8", errors="ignore")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(data)
+            return path
+        except Exception as e:
+            print("⚠️ فشل تحميل الكوكيز من الرابط:", e)
+
+    # fallback: لو فيه B64 أو RAW
     if TIKTOK_COOKIES_B64:
         try:
             data = base64.b64decode(TIKTOK_COOKIES_B64).decode("utf-8", errors="ignore")
@@ -73,6 +87,7 @@ def _write_cookies_file_if_any(tmpdir: str) -> str | None:
         except Exception:
             pass
     return None
+
 
 # ========== التحميل + التحويل ==========
 async def _download_with_ytdlp(url: str):
