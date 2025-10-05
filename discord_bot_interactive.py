@@ -64,10 +64,10 @@ async def download_video(url):
         return src_fp, title
     return converted_fp, title
 
-class URLModal(discord.ui.Modal, title="📥 أرسل رابط المقطع"):
+class URLModal(discord.ui.Modal, title="الـصـق رابـط الـمـقـطـع"):
     url_input = discord.ui.TextInput(
-        label="رابط الفيديو",
-        placeholder="ضع رابط TikTok / Instagram / X",
+        label="الـصـق الـرابـط و تـأكـد الـحـسـاب مـا يـكـون خـاص",
+        placeholder="Tiktok ضـع رابـط  ",
         style=discord.TextStyle.short
     )
 
@@ -109,14 +109,14 @@ class PanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="📩 اضغط هنا لتحميل مقطع", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="اضـغـط لـتـحـمـيـل مـقـطـع", style=discord.ButtonStyle.secondary)
     async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(URLModal(requester=interaction.user))
 
 @bot.tree.command(name="setup_panel", description="إنشاء لوحة التحميل العامة")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setup_panel(interaction: discord.Interaction):
-    await interaction.response.send_message("✅ تم إنشاء لوحة التحميل العامة:", view=PanelView())
+    await interaction.response.send_message("𝐍𝐗𝐒 𝐕𝐈𝐃𝐄𝐎 𝐃𝐎𝐖𝐍𝐋𝐎𝐀𝐃𝐄𝐑 ╾━╤デ╦︻", view=PanelView())
 
 @bot.event
 async def on_ready():
