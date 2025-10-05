@@ -9,6 +9,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from yt_dlp import YoutubeDL
+import time 
+import urllib.request
 
 # ========== الإعدادات ==========
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -52,41 +54,140 @@ async def _ffprobe_json(path: str):
 
 import urllib.request
 
+def _text_looks_like_netscape(txt: str) -> bool:
+    if txt.lstrip().startswith("# Netscape HTTP Cookie File"):
+        return True
+    # سطر كوكيز بنمط 7 أعمدة مفصولة بتاب
+    for line in txt.splitlines():
+        line=line.strip()
+        if not line or line.startswith("#"): 
+            continue
+        # على الأقل 6 أو 7 أعمدة
+        if len(line.split("\t")) >= 6:
+            return True
+        break
+    return False
+
+def _to_netscape(txt: str) -> str:
+    """
+    يحوّل أكثر الصيغ شيوعًا إلى Netscape:
+    - JSON (قائمة كائنات كوكيز)
+    - سطر 'Cookie: a=b; c=d'
+    - لو أصلاً Netscape يُرجع كما هو
+    """
+    t = txt.strip()
+    if _text_looks_like_netscape(t):
+        return t
+
+    # صيغة "Cookie: a=b; c=d"
+    if t.lower().startswith("cookie:") or ("=" in t and ";" in t and "\n" not in t):
+        pairs = t.split(":",1)[-1].strip() if t.lower().startswith("cookie:") else t
+        cookies = []
+        for p in pairs.split(";"):
+            if "=" in p:
+                name, val = p.strip().split("=",1)
+                cookies.append((name.strip(), val.strip()))
+        now_exp = int(time.time()) + 365*24*3600  # سنة
+        lines = ["# Netscape HTTP Cookie File"]
+        # نحط دومين عام .tiktok.com
+        for name,val in cookies:
+            lines.append("\t".join([
+                ".tiktok.com",  # domain
+                "TRUE",         # include subdomains
+                "/",            # path
+                "FALSE",        # secure
+                str(now_exp),   # expiry (unix)
+                name,
+                val
+            ]))
+        return "\n".join(lines) + "\n"
+
+    # JSON (EditThisCookie أو شبيه)
+    if t.startswith("{") or t.startswith("["):
+        try:
+            data = json.loads(t)
+            if isinstance(data, dict):
+                # أحياناً يكون تحت مفتاح "cookies"
+                data = data.get("cookies", [])
+            lines = ["# Netscape HTTP Cookie File"]
+            for c in data:
+                name  = c.get("name","")
+                value = c.get("value","")
+                domain = c.get("domain",".tiktok.com")
+                path = c.get("path","/")
+                secure = c.get("secure", False)
+                exp = c.get("expiry") or c.get("expirationDate") or int(time.time())+365*24*3600
+                # اجعل الدومين يبدأ بنقطة
+                if domain and not domain.startswith("."):
+                    domain = "."+domain
+                lines.append("\t".join([
+                    domain,
+                    "TRUE" if domain.startswith(".") else "FALSE",
+                    path,
+                    "TRUE" if secure else "FALSE",
+                    str(int(exp)),
+                    name,
+                    value
+                ]))
+            return "\n".join(lines) + "\n"
+        except Exception:
+            pass
+
+    # لو ما عرفناها، نغلفها كسطر واحد كـ Cookie: key=val
+    now_exp = int(time.time()) + 365*24*3600
+    lines = ["# Netscape HTTP Cookie File"]
+    if "=" in t:
+        for p in t.replace("Cookie:","").split(";"):
+            if "=" in p:
+                name,val = p.strip().split("=",1)
+                lines.append("\t".join([
+                    ".tiktok.com","TRUE","/","FALSE",str(now_exp),name.strip(),val.strip()
+                ]))
+    return "\n".join(lines) + "\n"
+
 def _write_cookies_file_if_any(tmpdir: str) -> str | None:
     """
-    يحمّل cookies.txt من رابط خارجي أو من المتغيرات البيئية.
+    يجلب الكوكيز من:
+    - TIKTOK_COOKIES_URL (Raw link)
+    - TIKTOK_COOKIES_B64
+    - TIKTOK_COOKIES (نص خام)
+    ثم يضمن تحويلها لنمط Netscape.
     """
+    path = os.path.join(tmpdir, "cookies.txt")
     url = os.getenv("TIKTOK_COOKIES_URL", "").strip()
+    data = ""
+
+    # 1) من رابط
     if url:
         try:
-            path = os.path.join(tmpdir, "cookies.txt")
             with urllib.request.urlopen(url) as resp:
                 data = resp.read().decode("utf-8", errors="ignore")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(data)
-            return path
         except Exception as e:
             print("⚠️ فشل تحميل الكوكيز من الرابط:", e)
 
-    # fallback: لو فيه B64 أو RAW
-    if TIKTOK_COOKIES_B64:
-        try:
-            data = base64.b64decode(TIKTOK_COOKIES_B64).decode("utf-8", errors="ignore")
-            path = os.path.join(tmpdir, "cookies.txt")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(data)
-            return path
-        except Exception:
-            pass
-    if TIKTOK_COOKIES_RAW:
-        try:
-            path = os.path.join(tmpdir, "cookies.txt")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(TIKTOK_COOKIES_RAW)
-            return path
-        except Exception:
-            pass
-    return None
+    # 2) من B64
+    if not data:
+        b64 = os.getenv("TIKTOK_COOKIES_B64", "").strip()
+        if b64:
+            try:
+                import base64
+                data = base64.b64decode(b64).decode("utf-8", errors="ignore")
+            except Exception as e:
+                print("⚠️ فشل فك Base64:", e)
+
+    # 3) من RAW
+    if not data:
+        raw = os.getenv("TIKTOK_COOKIES", "").strip()
+        if raw:
+            data = raw
+
+    if not data:
+        return None
+
+    netscape = _to_netscape(data)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(netscape)
+    return path
 
 
 # ========== التحميل + التحويل ==========
