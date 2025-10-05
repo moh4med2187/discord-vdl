@@ -66,7 +66,7 @@ async def download_video(url):
 
 class URLModal(discord.ui.Modal, title="الـصـق رابـط الـمـقـطـع"):
     url_input = discord.ui.TextInput(
-        label="الـصـق الـرابـط و تـأكـد الـحـسـاب مـا يـكـون خـاص",
+        label=" تـأكـد الـحـسـاب مـا يـكـون خـاص",
         placeholder="Tiktok ضـع رابـط  ",
         style=discord.TextStyle.short
     )
