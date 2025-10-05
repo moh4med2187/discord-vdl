@@ -80,7 +80,7 @@ class URLModal(discord.ui.Modal, title="الـصـق رابـط الـمـقـط
         if not URL_REGEX.search(url):
             await interaction.response.send_message("❌ الرابط غير صالح.", ephemeral=True)
             return
-        await interaction.response.send_message("⏳ جاري التحميل... سيتم الإرسال في الخاص ✅", ephemeral=True)
+        await interaction.response.send_message("سيتم ارسال المقطع لك في الخاص", ephemeral=True)
         asyncio.create_task(self.process(url))
 
     async def process(self, url: str):
